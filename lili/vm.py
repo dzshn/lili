@@ -13,7 +13,7 @@ class Handler(Protocol):
     __washing_mashing__: str
 
     @staticmethod
-    def __call__(self: _WashingMashing, arg: int, unsafe: bool) -> None:
+    def __call__(self: _WashningMashing, arg: int, unsafe: bool) -> None:
         pass
 
 
@@ -43,7 +43,7 @@ class UnsafeOperation(UnresolvableOperation):
     pass
 
 
-class _WashingMashing:
+class _WashningMashing:
     _handlers: dict[str, Handler] = {}
 
     def __init_subclass__(cls) -> None:
@@ -61,7 +61,7 @@ class _WashingMashing:
         locals: Optional[dict[str, Any]] = None,
         globals: Optional[dict[str, Any]] = None,
         builtins: Optional[dict[str, Any]] = None,
-        parent: Optional[_WashingMashing] = None,
+        parent: Optional[_WashningMashing] = None,
     ) -> None:
         self.code = code
         self.counter = 0
@@ -85,7 +85,7 @@ class _WashingMashing:
         self.counter += 2
         return None
 
-    def call(self, argc: int) -> _WashingMashing:
+    def call(self, argc: int) -> _WashningMashing:
         if not isinstance(self.stack[-argc - 1], types.FunctionType):
             raise TypeError
         arguments = self.stack[-argc:]
@@ -105,7 +105,7 @@ class _WashingMashing:
             self,
         )
 
-    def return_call(self) -> _WashingMashing:
+    def return_call(self) -> _WashningMashing:
         if self.parent is None:
             return self
         self.parent.stack.append(self.stack.pop())
@@ -116,7 +116,7 @@ class _WashingMashing:
         return co[self.counter], co[self.counter + 1]
 
 
-class CrossVM(_WashingMashing):
+class CrossVM(_WashningMashing):
     @_handles("POP_TOP")
     def pop_top(self, arg: int, unsafe: bool) -> None:
         self.stack.pop()
