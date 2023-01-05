@@ -180,11 +180,11 @@ def main() -> None:
 
             cmd, *args = expr.split(" ")
 
-            if cmd.removesuffix("!") in {"step", "s"}:
+            if cmd in {"step", "step!", "s", "s!"}:
                 if err := vm.step(unsafe=cmd.endswith("!")):
                     print(fmt_error(err), fmt_current(vm))
 
-            elif cmd.removesuffix("!") in {"cont", "c"}:
+            elif cmd in {"cont", "cont!", "c", "c!"}:
                 try:
                     if err := vm.cont(unsafe=cmd.endswith("!")):
                         print(fmt_error(err), fmt_current(vm))
@@ -193,13 +193,13 @@ def main() -> None:
                 except KeyboardInterrupt:
                     pass
 
-            elif cmd in {"show", "where", "w"}:
+            elif cmd in {"where", "w"}:
                 mark = "* "
                 for i, x in enumerate(traverse_calls(vm)):
                     print(f"{BLUE}[{mark}{i:>8}]:{RESET}", fmt_current(x))
                     mark = "  "
 
-            elif cmd == "dis":
+            elif cmd in {"dis", "i"}:
                 try:
                     query = eval(" ".join(args) or "0", get_eval_ctx(vm))
                 except Exception:
@@ -236,7 +236,7 @@ def main() -> None:
                         fmt_opcode(obj.code, op, arg, mark),
                     )
 
-            elif cmd == "info":
+            elif cmd in {"info", "f"}:
                 code = vm.code
                 location = f"{code.co_name} @ {code.co_filename}:{code.co_firstlineno}"
                 print(
@@ -262,7 +262,7 @@ def main() -> None:
 
             elif cmd in {"break", "b"}:
                 if not args:
-                    print(vm.breakpoints)
+                    print(f"{RED}[- failed -]{RESET} missing index argument")
                     continue
                 addr = args[0]
                 condition = " ".join(args[1:])
@@ -277,9 +277,22 @@ def main() -> None:
                 elif addr.isdecimal():
                     vm.toggle_breakpoint(int(addr), condition or None)
 
-            elif cmd == "allow":
+            elif cmd in {"allow", "a"}:
+                if not args:
+                    print(f"{RED}[- failed -]{RESET} missing opcode argument")
+                    continue
                 condition = " ".join(args[1:])
+                if condition:
+                    try:
+                        compile(condition, "::<>", "eval")
+                    except SyntaxError:
+                        print(f"{RED}[- failed -]{RESET} invalid condition")
+                        continue
                 vm.unsafe_ignores[args[0]] = condition or None
+
+            elif cmd == "disallow":
+                for op_name in args:
+                    del vm.unsafe_ignores[op_name]
 
             elif cmd in {"stack", "ps"}:
                 if vm.stack:
@@ -290,7 +303,7 @@ def main() -> None:
                 else:
                     print(f"{RED}stack is empty{RESET}")
 
-            elif cmd == "call":
+            elif cmd in {"call", "l"}:
                 op, arg = vm.current_opcode()
                 try:
                     if op == opcode.opmap["CALL_FUNCTION"]:
@@ -301,7 +314,7 @@ def main() -> None:
                 except TypeError:
                     print(f"{RED}[- failed -]{RESET} not a python function")
 
-            elif cmd == "return":
+            elif cmd in {"return", "r"}:
                 if not vm.parent:
                     print(f"{RED}no outer frame{RESET}")
                 vm = vm.return_call()  # type: ignore
@@ -325,9 +338,9 @@ def main() -> None:
                     vm.builtins[name] = getattr(builtins, name)
 
             elif cmd in {"incr", "i"}:
-                vm.counter += 2
+                vm.counter = vm.next_opcode()
 
-            elif cmd in {"bai", "bye", "exit", "quit"}:
+            elif cmd in {"bai", "bye", "exit", "quit", "q"}:
                 return
 
             else:
