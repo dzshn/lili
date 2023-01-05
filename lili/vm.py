@@ -31,7 +31,7 @@ def _handles(op: str) -> Callable[[Callable[..., None]], Handler]:
 
 
 def _unsafe(fn: Callable[..., None]) -> Callable[..., None]:
-    def wrapper(self, arg: int, unsafe: bool) -> None:
+    def wrapper(self: _WashningMashing, arg: int, unsafe: bool) -> None:
         if not unsafe:
             raise UnsafeOperation
         fn(self, arg, unsafe)

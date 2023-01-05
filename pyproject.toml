@@ -6,9 +6,18 @@ authors = ["Sofia Lima <me@dzshn.xyz>"]
 license = "MIT"
 readme = "README.md"
 
+[tool.poetry.scripts]
+lili = "lili.__main__:main"
+
 [tool.poetry.dependencies]
 python = "^3.9"
 
+[tool.poetry.group.dev.dependencies]
+tox = "^4.2.3"
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
 
 [build-system]
 requires = ["poetry-core"]
