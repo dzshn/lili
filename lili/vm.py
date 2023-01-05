@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, Optional, Protocol, cast
 
 import opcode
@@ -73,10 +73,20 @@ class _WashningMashing:
         self.globals = globals or {}
         self.builtins = builtins or {}
         self.parent = parent
+        self.breakpoints: dict[int, str | None] = {}
+        self.unsafe_ignores: dict[str, str | None] = {}
 
     def step(self, unsafe: bool = False) -> Optional[UnresolvableOperation]:
         op, arg = self.current_opcode()
-        handler = self._handlers.get(opcode.opname[op])
+        op_name = opcode.opname[op]
+        if op_name in self.unsafe_ignores:
+            if condition := self.unsafe_ignores[op_name]:
+                unsafe = bool(
+                    self.evaluate(condition, {"arg": arg, "stack": self.stack})
+                )
+            else:
+                unsafe = True
+        handler = self._handlers.get(op_name)
         if not handler:
             return UnresolvableOperation("unknown opcode")
         try:
@@ -88,6 +98,34 @@ class _WashningMashing:
         self.counter += 2
         return None
 
+    def cont(self, unsafe: bool = False) -> Optional[UnresolvableOperation]:
+        while True:
+            if err := self.step(unsafe=unsafe):
+                return err
+            if self.is_breakpoint():
+                return None
+
+    def evaluate(self, expr: str, ctx: dict[str, Any] = {}) -> Any:
+        return eval(expr, self.builtins | self.globals | self.locals | ctx)
+
+    def is_breakpoint(self, addr: Optional[int] = None) -> bool:
+        if addr is None:
+            addr = self.counter
+        if addr not in self.breakpoints:
+            return False
+        if condition := self.breakpoints[addr]:
+            try:
+                return bool(self.evaluate(condition))
+            except Exception:
+                return False
+        return True
+
+    def toggle_breakpoint(self, bp: int, condition: Optional[str] = None) -> None:
+        if bp in self.breakpoints and condition is None:
+            del self.breakpoints[bp]
+        else:
+            self.breakpoints[bp] = condition
+
     def call(self, argc: int) -> _WashningMashing:
         if not isinstance(self.stack[-argc - 1], types.FunctionType):
             raise TypeError
@@ -98,7 +136,7 @@ class _WashningMashing:
         assert isinstance(fn, types.FunctionType)
         code = fn.__code__
         defaults = fn.__defaults__ or ()
-        arguments.extend(defaults[-code.co_argcount - len(arguments):])
+        arguments.extend(defaults[code.co_argcount - len(defaults) - len(arguments) :])
         locals = dict(zip(code.co_varnames, arguments))
         return type(self)(
             code,
@@ -117,6 +155,13 @@ class _WashningMashing:
     def current_opcode(self) -> tuple[int, int]:
         co = self.code.co_code
         return co[self.counter], co[self.counter + 1]
+
+    def opcodes(self) -> Iterator[tuple[int, int, int]]:
+        code = self.code.co_code
+        i = 0
+        while i < len(code):
+            yield i, code[i], code[i + 1]
+            i += 2
 
 
 class CrossVM(_WashningMashing):
@@ -275,6 +320,25 @@ class CrossVM(_WashningMashing):
     def binary_subscr(self, arg: int, unsafe: bool) -> None:
         self.stack.append(self.stack.pop(-2)[self.stack.pop()])
 
+    @_handles("COMPARE_OP")
+    @_unsafe
+    def compare_op(self, arg: int, unsafe: bool) -> None:
+        op = opcode.cmp_op[arg]
+        right = self.stack.pop()
+        left = self.stack.pop()
+        if op == "<":
+            self.stack.append(left < right)
+        elif op == "<=":
+            self.stack.append(left <= right)
+        elif op == "==":
+            self.stack.append(left == right)
+        elif op == "!=":
+            self.stack.append(left != right)
+        elif op == ">":
+            self.stack.append(left > right)
+        elif op == ">=":
+            self.stack.append(left >= right)
+
     @_handles("LOAD_CONST")
     def load_const(self, arg: int, unsafe: bool) -> None:
         self.stack.append(self.code.co_consts[arg])
@@ -312,6 +376,8 @@ class CrossVM(_WashningMashing):
         name = self.code.co_names[arg]
         if name in self.globals:
             self.stack.append(self.globals[name])
+        elif name in self.builtins:
+            self.stack.append(self.builtins[name])
         else:
             raise NameError(f"local {name} is not defined")
 
@@ -323,7 +389,16 @@ class CrossVM(_WashningMashing):
     @_handles("BUILD_TUPLE")
     def build_tuple(self, arg: int, unsafe: bool) -> None:
         self.stack.append(tuple(self.stack[-arg:]))
-        del self.stack[-arg-1:-1]
+        del self.stack[-arg - 1 : -1]
+
+    @_handles("BUILD_LIST")
+    def build_list(self, arg: int, unsafe: bool) -> None:
+        self.stack.append(list(self.stack[-arg:]))
+        del self.stack[-arg - 1 : -1]
+
+    @_handles("UNPACK_SEQUENCE")
+    def unpack_sequence(self, arg: int, unsafe: bool) -> None:
+        self.stack.extend([*self.stack.pop()][:arg])
 
     @_handles("MAKE_FUNCTION")
     def make_function(self, arg: int, unsafe: bool) -> None:
@@ -350,8 +425,22 @@ class CrossVM(_WashningMashing):
     @_handles("CALL_FUNCTION")
     @_unsafe
     def call_function(self, arg: int, unsafe: bool) -> None:
-        arguments = self.stack[-arg:]
-        del self.stack[-arg:]
+        if arg:
+            arguments = self.stack[-arg:]
+            del self.stack[-arg:]
+        else:
+            arguments = []
 
         fn = self.stack.pop()
+        if isinstance(fn, types.FunctionType):
+            code = fn.__code__
+            defaults = fn.__defaults__ or ()
+            arguments.extend(
+                defaults[code.co_argcount - len(defaults) - len(arguments) :]
+            )
         self.stack.append(fn(*arguments))
+
+    @_handles("JUMP_ABSOLUTE")
+    @_unsafe
+    def jump_absolute(self, arg: int, unsafe: bool) -> None:
+        self.counter = arg * 2 - 2
