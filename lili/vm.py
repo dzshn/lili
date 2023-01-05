@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import abc
 import sys
 import types
 from collections.abc import Callable, Iterator
@@ -9,7 +10,7 @@ from typing import Any, Optional, Protocol, cast
 
 import opcode
 
-from lili.compat import Version
+from lili.compat import FIXED_WIDTH_OPCODES, Version
 
 
 class Handler(Protocol):
@@ -46,7 +47,7 @@ class UnsafeOperation(UnresolvableOperation):
     pass
 
 
-class _WashningMashing:
+class _WashningMashing(abc.ABC):
     _handlers: dict[str, Handler] = {}
 
     def __init_subclass__(cls) -> None:
@@ -95,7 +96,7 @@ class _WashningMashing:
             return e
         except Exception as e:
             return UnresolvableOperation(e)
-        self.counter += 2
+        self.counter = self.next_opcode()
         return None
 
     def cont(self, unsafe: bool = False) -> Optional[UnresolvableOperation]:
@@ -152,16 +153,17 @@ class _WashningMashing:
         self.parent.stack.append(self.stack.pop())
         return self.parent
 
+    @abc.abstractmethod
     def current_opcode(self) -> tuple[int, int]:
-        co = self.code.co_code
-        return co[self.counter], co[self.counter + 1]
+        ...
 
+    @abc.abstractmethod
+    def next_opcode(self, i: Optional[int] = None) -> int:
+        ...
+
+    @abc.abstractmethod
     def opcodes(self) -> Iterator[tuple[int, int, int]]:
-        code = self.code.co_code
-        i = 0
-        while i < len(code):
-            yield i, code[i], code[i + 1]
-            i += 2
+        ...
 
 
 class CrossVM(_WashningMashing):
@@ -178,6 +180,38 @@ class CrossVM(_WashningMashing):
         if parent is not None and version is None:
             version = parent.version
         self.version: Version = version or tuple(sys.version_info)
+
+    def current_opcode(self) -> tuple[int, int]:
+        co = self.code.co_code
+        op = co[self.counter]
+        if self.version < FIXED_WIDTH_OPCODES and op < opcode.HAVE_ARGUMENT:
+            return op, 0
+
+        return op, co[self.counter + 1]
+
+    def next_opcode(self, i: Optional[int] = None) -> int:
+        if i is None:
+            i = self.counter
+        op = self.code.co_code[i]
+        if self.version < FIXED_WIDTH_OPCODES and op < opcode.HAVE_ARGUMENT:
+            return i + 1
+        return i + 2
+
+    def opcodes(self) -> Iterator[tuple[int, int, int]]:
+        co = self.code.co_code
+        i = 0
+        if self.version < FIXED_WIDTH_OPCODES:
+            while i < len(co):
+                if co[i] < opcode.HAVE_ARGUMENT:
+                    yield i, co[i], 0
+                    i += 1
+                else:
+                    yield i, co[i], int.from_bytes(co[i + 1 : i + 3], "little")
+                    i += 3
+        else:
+            while i < len(co):
+                yield i, co[i], co[i + 1]
+                i += 2
 
     @_handles("POP_TOP")
     def pop_top(self, arg: int, unsafe: bool) -> None:

@@ -1,13 +1,13 @@
 import builtins
 import sys
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from types import CodeType, FunctionType
 from typing import Any
 
 import opcode
 
-from lili.compat import PYC_MAGIC, read_pyc
+from lili.compat import PYC_MAGIC, Version, read_pyc
 from lili.vm import CrossVM, UnresolvableOperation, UnsafeOperation
 
 CSI = "\x1b["
@@ -91,6 +91,36 @@ def fmt_error(error: UnresolvableOperation) -> str:
             fmt += f"({error.args[0]})"
 
     return fmt
+
+
+def fmt_version(version: Version) -> str:
+    fmt = ""
+    for part in version:
+        if isinstance(part, int):
+            if fmt and fmt[-1].isdecimal():
+                fmt += "."
+            fmt += str(part)
+        elif part == "alpha":
+            fmt += "a"
+        elif part == "beta":
+            fmt += "b"
+        elif part == "candidate":
+            fmt += "rc"
+        elif part == "final":
+            break
+    return fmt
+
+
+def fmt_table(table: Iterable[tuple[str, Any]]) -> str:
+    fmt = ""
+    for k, v in table:
+        if not isinstance(v, str):
+            v = str(v)
+        prefix = f"{PURPLE}{k:>12}: {RESET}"
+        for line in v.splitlines():
+            fmt += prefix + line + "\n"
+            prefix = " " * 14
+    return fmt.strip()
 
 
 def get_eval_ctx(vm: CrossVM) -> dict[str, Any]:
@@ -205,8 +235,30 @@ def main() -> None:
                         f"{BLUE}[0x{i:0>8x}]:",
                         fmt_opcode(obj.code, op, arg, mark),
                     )
+
             elif cmd == "info":
-                print(f"{PURPLE}Version detected{RESET}: {vm.version}")
+                code = vm.code
+                location = f"{code.co_name} @ {code.co_filename}:{code.co_firstlineno}"
+                print(
+                    f"{BLUE}{'-- code --':^26}",
+                    fmt_table(
+                        [
+                            ("location", location),
+                            ("stack size", code.co_stacksize),
+                            ("flags", code.co_flags),
+                        ]
+                    ),
+                    fmt_table([("consts", "\n".join(map(fmt_const, code.co_consts)))]),
+                    fmt_table(
+                        [
+                            (scope, "\n".join(getattr(code, "co_" + scope)))
+                            for scope in ["names", "varnames", "freevars", "cellvars"]
+                        ]
+                    ),
+                    f"{BLUE}{'-- vm --':^26}",
+                    fmt_table([("version", fmt_version(vm.version))]),
+                    sep="\n",
+                )
 
             elif cmd in {"break", "b"}:
                 if not args:
