@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import sys
 import types
 from collections.abc import Callable
 from typing import Any, Optional, Protocol, cast
 
 import opcode
+
+from lili.compat import Version
 
 
 class Handler(Protocol):
@@ -117,6 +120,20 @@ class _WashningMashing:
 
 
 class CrossVM(_WashningMashing):
+    def __init__(
+        self,
+        code: types.CodeType,
+        locals: Optional[dict[str, Any]] = None,
+        globals: Optional[dict[str, Any]] = None,
+        builtins: Optional[dict[str, Any]] = None,
+        parent: Optional[CrossVM] = None,
+        version: Optional[Version] = None,
+    ) -> None:
+        super().__init__(code, locals, globals, builtins, parent)
+        if parent is not None and version is None:
+            version = parent.version
+        self.version: Version = version or tuple(sys.version_info)
+
     @_handles("POP_TOP")
     def pop_top(self, arg: int, unsafe: bool) -> None:
         self.stack.pop()

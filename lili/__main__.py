@@ -4,6 +4,7 @@ import sys
 import traceback
 import types
 from typing import Any
+from lili.compat import PYC_MAGIC, read_pyc
 
 from lili.vm import CrossVM
 
@@ -77,7 +78,13 @@ def main():
 
     filename = sys.argv[1]
     with open(filename, "rb") as f:
-        vm = CrossVM(compile(f.read(), filename, "exec"))
+        header = f.read(4)
+        f.seek(0)
+        if header[2:4] == PYC_MAGIC:
+            version, code = read_pyc(f)
+            vm = CrossVM(code, version=version)
+        else:
+            vm = CrossVM(compile(f.read(), filename, "exec"))
 
     on_break = True
     while True:
