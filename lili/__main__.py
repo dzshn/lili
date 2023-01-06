@@ -24,7 +24,7 @@ def fmt_const(obj: Any, _depth: int = 0) -> str:
     if _depth >= 8:
         return f"{RESET}…"
 
-    if obj in {None, StopIteration, Ellipsis}:
+    if obj in (None, StopIteration, Ellipsis):
         return f"{YELLOW}{obj}"
 
     if isinstance(obj, (str, bytes)):
