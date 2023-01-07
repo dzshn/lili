@@ -27,67 +27,98 @@ $ pip install git+https://github.com/dzshn/lili
 ## Commands
 
 The following commands are recognised by `lili`. Text enclosed in `[]` is
-optional, and text enclosed in `{}` means it's an required argument.
+optional (including in the command names). Arguments expecting integers may use
+hex, octal or binary with their respective prefixes (`0xc382f`, `0o777`,
+`0b10001111`). Any other expression will be evaluated as python code, outside
+of the actual program being debugged. The variables `vm`, `code`, `stack`,
+`locals`, `globals` and `builtins` are exposed for you to use.
 
--   `s[tep][!]` : `step`, `s`
+**`a[llow] opcode [condition]`**
 
-    Step over the next instruction. By default, only opcodes with no side
-    effects will be executed unless the command ends with an exclamation mark.
+Mark an opcode as safe.
 
--   `c[ont][!]` : `cont`, `c`
+**`b[reak] location [condition]`**
 
-    Continuously execute (step over) instructions until a breakpoint is
-    reached, or an opcode fails. `!` follows the same convention as `step`.
+Toggle a breakpoint at location.
 
--   `w[here]` : `where`, `w`
+If a condition is given, the breakpoint will only trigger if it evaluates to true.
 
-    Display the current call stack and positions.
+**Example:** `break 0x4c x > 128`
 
--   `d[is] [object]` : `dis`, `d`
+**`builtin [names..]`**
 
-    Disassemble and display a function or code object's bytecode. If no
-    argument is given, disassemble the current frame. If the argument is an
-    integer, disassemble the nth call frame.
+Insert a builtin into the VM's builtins.
 
--   `i[nfo]` : `info`, `i`
+The `builtins` scope is treated like `globals`, but can't be assigned.
 
-    Display info about the current code object and the VM.
+**`[cal]l [argc]`**
 
--   `b[reak] {index} [condition]` : `break`, `b`
+Call function and drop into it's frame.
 
-    Toggle or update a breakpoint at `index`. If a `condition` is given, the
-    breakpoint will only be used if it evaluates to true.
+**`c[ont]`**
 
--   `a[llow] {opcode} [condition]` : `allow`, `a`
+Step over instructions until a breakpoint is reached.
 
-    Mark an opcode as safe, optionally with a `condition`. The variables
-    `stack` and `arg` are also available at when the condition is evaluated.
+Only executes opcodes with no side effects. (see `cont!`)
 
--   `disallow {opcode}`
+**`cont!, c!`**
 
-    Remove a previously `allow`ed opcode.
+Like cont, but unsafe. May execute opcodes with side effects.
 
--   `[cal]l [argc]` : `call`, `l`
+**`d[is] [obj]`**
 
-    Call the function like `CALL_FUNCTION` and drop into it's frame.
+Disassemble and display a function or object's bytecode.
 
--   `r[eturn]`
+**`disallow [opcodes..]`**
 
-    Push top of stack into parent frame, then pop the current frame.
+Unmark an opcode as safe.
 
--   `push [expr]`
+**`h[elp], ? [query]`**
 
-    Evaluate `expr` and push it into the stack.
+Display help about debugger commands.
 
--   `pop`
+**Example:** `help cont!`
 
-    Pop and discard a value from the stack.
+**`i[ncr] [count]`**
 
--   `builtin [name…]`
+Increment the instruction counter.
 
-    Insert a member from the `builtins` module into the VM's `builtins`, which
-    is empty by default.
+**Note:** count is the opcode count, not bytes.
 
--   `q[uit]`
+**`[inf]o [obj]`**
 
-    Exit the debugger.
+Display info about the code and the VM.
+
+**`pop [indices..]`**
+
+Pop and discard a value from the stack.
+
+**`push expr`**
+
+Push a value into the stack.
+
+**`q[uit], bye, exit`**
+
+Exit the debugger.
+
+**`r[eturn]`**
+
+Push top of stack into outer frame and pop the current frame.
+
+**`stack, ps`**
+
+Display the current stack.
+
+**`s[tep] times`**
+
+Step over the next instruction.
+
+Only opcodes with no side effects are executed. (see `step!`)
+
+**`step!, s! times`**
+
+Like step, but unsafe. May execute opcodes with side effects.
+
+**`w[here]`**
+
+Display the current call stack and positions.

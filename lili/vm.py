@@ -5,12 +5,17 @@ from __future__ import annotations
 import abc
 import sys
 import types
-from collections.abc import Callable, Iterator
-from typing import Any, Optional, Protocol, cast
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any, Optional, Protocol, TypeVar, cast
 
 import opcode
 
 from lili.compat import FIXED_WIDTH_OPCODES, Version
+
+__all__ = ["CrossVM"]
+
+# no typing.Self? <https://github.com/python/mypy/issues/11871>
+_WashningMashingT = TypeVar("_WashningMashingT", bound="_WashningMashing")
 
 
 class Handler(Protocol):
@@ -127,7 +132,9 @@ class _WashningMashing(abc.ABC):
         else:
             self.breakpoints[bp] = condition
 
-    def call(self, argc: int) -> _WashningMashing:
+    def call(self: _WashningMashingT, argc: Optional[int] = None) -> _WashningMashingT:
+        if argc is None:
+            _, argc = self.current_opcode()
         if not isinstance(self.stack[-argc - 1], types.FunctionType):
             raise TypeError
         arguments = self.stack[-argc:]
@@ -147,11 +154,19 @@ class _WashningMashing(abc.ABC):
             self,
         )
 
-    def return_call(self) -> _WashningMashing:
+    def return_call(self: _WashningMashingT) -> _WashningMashingT:
         if self.parent is None:
             return self
         self.parent.stack.append(self.stack.pop())
-        return self.parent
+        return self.parent  # type: ignore
+
+    def traverse_calls(self: _WashningMashingT) -> Iterable[_WashningMashingT]:
+        vm = self
+        while True:
+            yield vm
+            if not vm.parent:
+                return
+            vm = vm.parent  # type: ignore
 
     @abc.abstractmethod
     def current_opcode(self) -> tuple[int, int]:

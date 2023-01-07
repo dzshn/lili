@@ -1,14 +1,34 @@
+from __future__ import annotations
+
 import builtins
+import getopt
 import sys
+import textwrap
 import traceback
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable
 from types import CodeType, FunctionType
-from typing import Any
+from typing import (
+    Annotated,
+    Any,
+    ClassVar,
+    Optional,
+    Protocol,
+    TypeVar,
+    Union,
+    cast,
+    get_type_hints,
+)
 
 import opcode
 
-from lili.compat import PYC_MAGIC, Version, read_pyc
+import lili
+from lili.compat import PYC_MAGIC, CompilerFlags, Version, read_pyc
 from lili.vm import CrossVM, UnresolvableOperation, UnsafeOperation
+
+T = TypeVar("T", str, int)
+# notifies handle_command an argument's string can't be empty
+NotEmpty = Annotated[T, object()]
+
 
 CSI = "\x1b["
 RED = CSI + "31m"
@@ -17,10 +37,524 @@ YELLOW = CSI + "33m"
 BLUE = CSI + "34m"
 PURPLE = CSI + "35m"
 CYAN = CSI + "36m"
+REVERSE = CSI + "7m"
 RESET = CSI + "0m"
 
+USAGE = f"""\
+lili {lili.__version__}
 
-def fmt_const(obj: Any, _depth: int = 0) -> str:
+{BLUE}USAGE
+    {PURPLE}lili {RESET}[flags] file            {YELLOW}Compile and debug script
+    {PURPLE}lili {RESET}[flags] file [cmd...]   {YELLOW}Automatically run commands
+
+{BLUE}FLAGS
+    {PURPLE}-h, --help      {YELLOW}Display this message
+    {PURPLE}--[no-]color    {YELLOW}Force usage of colors (on by default on terminals)
+{RESET}\
+"""
+
+
+class Command(Protocol):
+    __lili_command_names__: tuple[str, ...]
+
+    @staticmethod
+    def __call__(self: CommandHandler, *args: Union[str, int]) -> None:
+        ...
+
+
+class CommandError(Exception):
+    pass
+
+
+class CommandHandler:
+    commands: ClassVar[dict[str, Command]] = {}
+    command_set: ClassVar[set[Command]] = set()
+
+    def __init_subclass__(cls) -> None:
+        for base in cls.mro():
+            if issubclass(base, CommandHandler):
+                cls.commands |= base.commands
+                cls.command_set |= base.command_set
+                break
+
+        for attr, value in cls.__dict__.items():
+            for name in getattr(value, "__lili_command_names__", ()):
+                cls.commands[name] = value
+                cls.command_set.add(value)
+
+    def _parse_int(self, string: str) -> Optional[int]:
+        for i, j in [("0x", 16), ("0o", 8), ("0b", 2)]:
+            if string.removeprefix("-").startswith(i):
+                try:
+                    return int(j)
+                except ValueError:
+                    return None
+        if string.isdecimal():
+            return int(string)
+        return None
+
+    def handle_command(self, name: str, arguments: list[str]) -> None:
+        if name not in self.commands:
+            self.fallback_command([name, *arguments])
+            return
+
+        arguments = arguments.copy()
+
+        command = self.commands[name]
+        type_hints = get_type_hints(command, include_extras=True)
+        fn = cast(FunctionType, command)
+        code = fn.__code__
+        defaults = fn.__defaults__ or ()
+        has_varargs = bool(code.co_flags & CompilerFlags.VARARGS)
+        argc = code.co_argcount - 1  # don't include self
+        if has_varargs:
+            argc += len(arguments)
+            var_arg_name = code.co_varnames[code.co_argcount]
+            annotation = type_hints[var_arg_name]
+            if annotation == NotEmpty[str] and not arguments:
+                raise CommandError(f"expected at least one {var_arg_name}")
+
+        command_args: list[Any] = []
+        for i in range(argc):
+            arg_name = code.co_varnames[min(i + 1, code.co_argcount)]
+            required_type = type_hints[arg_name]
+            if required_type is str:
+                if i == argc - 1:
+                    command_args.append(" ".join(arguments))
+                    del arguments[:]
+                else:
+                    command_args.append(arguments.pop(0))
+            elif required_type is int:
+                if not arguments:
+                    if i > argc - len(defaults) - 1:
+                        break
+                    raise CommandError(f"missing required argument {arg_name}")
+                if (arg := self._parse_int(arguments[0])) is None:
+                    raise CommandError(f"expected integer, but got {arguments[0]}")
+                command_args.append(arg)
+                arguments.pop(0)
+            else:
+                if arguments and (arg := self._parse_int(arguments[0])) is not None:
+                    command_args.append(arg)
+                    arguments.pop(0)
+                elif i == argc - 1:
+                    command_args.append(" ".join(arguments))
+                else:
+                    command_args.append(arguments.pop(0))
+        if arguments:
+            raise CommandError(f"unexpected argument: {' '.join(arguments)}")
+
+        command(self, *command_args)
+
+    def fallback_command(self, arguments: list[str]) -> None:
+        ...
+
+
+def command(*names: str) -> Callable[[Callable[..., None]], Command]:
+    def decorator(fn: Callable[..., None]) -> Command:
+        fn = cast(Command, fn)
+        fn.__lili_command_names__ = names
+        return fn
+
+    return decorator
+
+
+class Debugger(CommandHandler):
+    def main(self) -> None:
+        try:
+            import readline
+        except ModuleNotFoundError:
+            pass
+        else:
+            self._readline = readline
+            readline.parse_and_bind("tab: complete")
+            readline.set_completer(self.complete)
+
+        opts, args = getopt.getopt(
+            sys.argv[1:],
+            "h",
+            ["help", "color", "no-color"],
+        )
+
+        is_interactive = sys.stdout.isatty()
+
+        self.use_color = is_interactive
+        for opt, value in opts:
+            if opt in {"-h", "--help"}:
+                self.print(USAGE)
+                sys.exit(0)
+            if opt == "--color":
+                self.use_color = True
+            elif opt == "--no-color":
+                self.use_color = False
+
+        if not args:
+            self.print(USAGE, file=sys.stderr)
+            self.print(f"{RED}ERROR:{RESET} missing file")
+            sys.exit(1)
+
+        filename = args.pop(0)
+        with open(filename, "rb") as f:
+            header = f.read(4)
+            f.seek(0)
+            if header[2:4] == PYC_MAGIC:
+                version, code = read_pyc(f)
+                self.vm = CrossVM(code, version=version)
+            else:
+                self.vm = CrossVM(compile(f.read(), filename, "exec"))
+
+        for i in args:
+            name, *cmd_args = i.split(" ")
+            self.handle_command(name, cmd_args)
+
+        if not is_interactive:
+            return
+
+        while True:
+            try:
+                for cmd in input(self.get_prompt()).split(";"):
+                    name, *cmd_args = cmd.split(" ")
+                    self.handle_command(name, cmd_args)
+            except EOFError:
+                print("^D")
+                break
+            except KeyboardInterrupt:
+                print("^C")
+            except CommandError as e:
+                self.print(f"{RED}[- failed -]:{RESET} {e}")
+            except Exception:
+                traceback.print_exc()
+
+    def get_prompt(self) -> str:
+        if not self.use_color:
+            return f"[0x{self.vm.counter:0>8}]> "
+        return f"{YELLOW}[0x{self.vm.counter:0>8}]>{RESET} "
+
+    def print(self, *values: Any, **kwargs: Any) -> None:
+        new_values: list[Any] = []
+        for i in values:
+            if isinstance(i, str) and not self.use_color:
+                # continuously match <CSI><color>"m" and <CSI> and replace with nothing
+                while (j := i.find(CSI)) != -1:
+                    i = i[:j] + i[max(i.find("m", j), j) + 1 :]
+            new_values.append(i)
+        print(*new_values, **kwargs)
+
+    def fallback_command(self, arguments: list[str]) -> None:
+        code = " ".join(arguments)
+        try:
+            compile(code, "::<>", "eval")
+        except SyntaxError:
+            exec(code, get_eval_ctx(self.vm))
+        else:
+            print(eval(code, get_eval_ctx(self.vm)))
+
+    def complete(self, text: str, state: int) -> Optional[str]:
+        i = 0
+        for name in self.commands:
+            if name.startswith(text):
+                if i == state:
+                    return name + " "
+                i += 1
+
+        return None
+
+    @command("help", "h", "?")
+    def help(self, query: str = "") -> None:
+        """Display help about debugger commands.
+
+        Example: help cont!
+        """
+
+        if command := self.commands.get(query):
+            self.print(fmt_command(command) + "\n")
+            doc = command.__doc__ or ""
+            doc = doc.strip()
+            doc = doc.replace("Note:", f"{YELLOW}Note:{RESET}")
+            doc = doc.replace("Example:", f"{YELLOW}Example:{PURPLE}")
+            if "\n" in doc:
+                first_line, doc = doc.split("\n", 1)
+                doc = first_line + "\n" + textwrap.dedent(doc)
+            self.print(doc)
+            return
+
+        for command in sorted(self.command_set, key=lambda c: c.__lili_command_names__):
+            name, *aliases = command.__lili_command_names__
+            if name == "meow":
+                continue  # :3
+
+            doc = (command.__doc__ or "").split("\n")[0].split(".")[0]
+            signature = fmt_command(command)
+            # str.center won't work because of the color escapes
+            padding = " " * (32 - len(signature) + signature.count(CSI) * 5)
+            self.print(f"{signature}{padding}{YELLOW} {doc}")
+
+    @command("step", "s")
+    def step(self, times: int) -> None:
+        """Step over the next instruction.
+
+        Only opcodes with no side effects are executed. (see `step!`)
+        """
+        for i in range(times):
+            if err := self.vm.step():
+                self.print(fmt_error(err), fmt_current(self.vm))
+                break
+
+    @command("step!", "s!")
+    def step_unsafe(self, times: int) -> None:
+        """Like step, but unsafe. May execute opcodes with side effects."""
+        for i in range(times):
+            if err := self.vm.step(unsafe=True):
+                self.print(fmt_error(err), fmt_current(self.vm))
+                break
+
+    @command("cont", "c")
+    def cont(self) -> None:
+        """Step over instructions until a breakpoint is reached.
+
+        Only executes opcodes with no side effects. (see `cont!`)
+        """
+        if err := self.vm.cont():
+            self.print(fmt_error(err), fmt_current(self.vm))
+
+    @command("cont!", "c!")
+    def cont_unsafe(self) -> None:
+        """Like cont, but unsafe. May execute opcodes with side effects."""
+        if err := self.vm.cont():
+            self.print(fmt_error(err), fmt_current(self.vm))
+
+    @command("where", "w")
+    def where(self) -> None:
+        """Display the current call stack and positions."""
+        mark = "* "
+        for i, x in enumerate(self.vm.traverse_calls()):
+            self.print(f"{BLUE}[{mark}{i:>8}]:{RESET}", fmt_current(x))
+            mark = "  "
+
+    @command("meow")
+    def meow(self, times: int = 1) -> None:
+        """Please divert your attention into this cat.
+
+          ／l、
+        （ﾟ､ ｡ ７
+          l、 ~ヽ
+          じしf_,)ノ
+        """
+        for i in range(times):
+            self.print("meow!")
+
+    @command("dis", "d")
+    def dis(self, obj: Union[str, int] = "") -> None:
+        """Disassemble and display a function or object's bytecode."""
+        if isinstance(obj, int):
+            for i, x in enumerate(self.vm.traverse_calls()):
+                if i == obj:
+                    vm = x
+                    break
+            else:
+                raise CommandError(f"call stack is too shallow ({i})")
+        elif not obj:
+            vm = self.vm
+        else:
+            query = eval(obj, get_eval_ctx(self.vm))
+
+            if isinstance(query, CodeType):
+                vm = CrossVM(query)
+            elif isinstance(query, FunctionType):
+                vm = CrossVM(query.__code__)
+            elif isinstance(query, CrossVM):
+                vm = query
+            else:
+                raise CommandError(f"not a code object or function: {query}")
+
+        for i, op, arg in vm.opcodes():
+            mark = "   "
+            if bp := vm.breakpoints.get(i):
+                if bp is not None:
+                    mark = f" {YELLOW}o {GREEN}"
+                else:
+                    mark = f" {RED}o {GREEN}"
+
+            if i == vm.counter:
+                mark = " * "
+
+            self.print(f"{BLUE}[0x{i:0>8x}]:", fmt_opcode(vm.code, op, arg, mark))
+
+    @command("info", "o")
+    def info(self, obj: Union[str, int] = "") -> None:
+        """Display info about the code and the VM."""
+        if isinstance(obj, int):
+            for i, x in enumerate(self.vm.traverse_calls()):
+                if i == obj:
+                    vm = x
+                    break
+        elif not obj:
+            vm = self.vm
+        else:
+            query = eval(obj, get_eval_ctx(self.vm))
+            if isinstance(query, CodeType):
+                vm = CrossVM(query)
+            elif isinstance(query, FunctionType):
+                vm = CrossVM(query.__code__)
+            elif isinstance(query, CrossVM):
+                vm = query
+            else:
+                raise CommandError(f"not a code object or function: {query}")
+
+        code = vm.code
+        location = f"{code.co_name} @ {code.co_filename}:{code.co_firstlineno}"
+        self.print(
+            f"{BLUE}" + "-- code --".center(26),
+            fmt_table(
+                [
+                    ("location", location),
+                    ("stack size", code.co_stacksize),
+                    ("flags", fmt_code_flags(code.co_flags)),
+                ],
+            ),
+            fmt_table(
+                [
+                    (scope, "\n".join(getattr(code, "co_" + scope)))
+                    for scope in ("names", "varnames", "freevars", "cellvars")
+                ]
+            ),
+            fmt_table([("consts", "\n".join(map(fmt_const, code.co_consts)))]),
+            f"{BLUE}" + "-- vm --".center(26),
+            fmt_table(
+                [
+                    ("version", fmt_version(vm.version)),
+                    ("implementation", "CPython"),
+                ]
+            ),
+            sep="\n",
+        )
+
+    @command("break", "b")
+    def break_(self, location: int, condition: str = "") -> None:
+        """Toggle a breakpoint at location.
+
+        If a condition is given, the breakpoint will only trigger if it
+        evaluates to true.
+
+        Example: break 0x4c x > 128
+        """
+        if condition:
+            compile(condition, "::<>", "eval")  # let SyntaxError propragate
+
+        self.vm.toggle_breakpoint(location, condition or None)
+
+    @command("allow", "a")
+    def allow(self, opcode: str, condition: str = "") -> None:
+        """Mark an opcode as safe."""
+        if condition:
+            compile(condition, "::<>", "eval")
+
+        self.vm.unsafe_ignores[opcode] = condition or None
+
+    @command("disallow")
+    def disallow(self, *opcodes: NotEmpty[str]) -> None:
+        """Unmark an opcode as safe."""
+        for op in opcodes:
+            if op in self.vm.unsafe_ignores:
+                del self.vm.unsafe_ignores[op]
+
+    @command("stack", "ps")
+    def stack(self) -> None:
+        """Display the current stack."""
+        if not self.vm.stack:
+            self.print(f"{RED}stack is empty")
+            return
+
+        mark = " ↓"
+        for i, x in reversed([*enumerate(self.vm.stack)]):
+            self.print(f"{BLUE}[{mark}{i:>8}]: {fmt_const(x)}")
+            mark = "  "
+
+    @command("call", "l")
+    def call(self, argc: int = 0) -> None:
+        """Call function and drop into it's frame."""
+        op, arg = self.vm.current_opcode()
+        try:
+            self.vm = self.vm.call()
+        except TypeError:
+            raise CommandError("not a python function")
+
+    @command("return", "r")
+    def return_(self) -> None:
+        """Push top of stack into outer frame and pop the current frame."""
+        if self.vm.parent is None:
+            raise ValueError("no outer call")
+
+        self.vm = self.vm.call()
+
+    @command("push")
+    def push(self, expr: str) -> None:
+        """Push a value into the stack."""
+        self.vm.stack.append(eval(expr, get_eval_ctx(self.vm)))
+
+    @command("pop")
+    def pop(self, *indices: int) -> None:
+        """Pop and discard a value from the stack."""
+        if not indices:
+            indices = (0,)
+        for i in indices:
+            self.print(fmt_const(self.vm.stack.pop(i)))
+
+    @command("builtin")
+    def builtin(self, *names: NotEmpty[str]) -> None:
+        """Insert a builtin into the VM's builtins.
+
+        The `builtins` scope is treated like `globals`, but can't be assigned.
+        """
+        for name in names:
+            self.vm.builtins[name] = getattr(builtins, name)
+
+    @command("incr", "i")
+    def incr(self, count: int = 1) -> None:
+        """Increment the instruction counter.
+
+        Note: count is the opcode count, not bytes.
+        """
+        for i in range(count):
+            self.vm.counter = self.vm.next_opcode()
+
+    @command("quit", "q", "bai", "bye", "exit")
+    def quit(self) -> None:
+        """Exit the debugger."""
+        sys.exit(0)
+
+
+def fmt_command(command: Command) -> str:
+    name, *aliases = command.__lili_command_names__
+    fn = cast(FunctionType, command)
+    code = fn.__code__
+    defaults = fn.__defaults__ or ()
+    has_varargs = bool(code.co_flags & CompilerFlags.VARARGS)
+    argc = code.co_argcount
+    if has_varargs:
+        argc += 1
+    args = code.co_varnames[1:argc]
+    fmt = name
+    for alias in aliases:
+        if alias in fmt:
+            common = fmt.replace(alias, "", 1)
+            fmt = fmt.replace(common, f"{BLUE}[{common}]{PURPLE}")
+        else:
+            fmt += f", {alias}"
+
+    fmt += f" {RESET}"
+    for i, arg in enumerate(args):
+        if i > argc - len(defaults) - 2:
+            fmt += f"[{arg}] "
+        elif has_varargs and i == argc - 2:
+            fmt += f"[{arg}..]"
+        else:
+            fmt += f"{arg} "
+
+    return PURPLE + fmt
+
+
+def fmt_const(obj: Any, *, _depth: int = 0) -> str:
     if _depth >= 8:
         return f"{RESET}…"
 
@@ -111,6 +645,19 @@ def fmt_version(version: Version) -> str:
     return fmt
 
 
+def fmt_code_flags(flags: int) -> str:
+    fmt = ""
+    for i in range(32):
+        flag = 1 << i
+        if flags & flag:
+            if name := CompilerFlags(flag).name:
+                fmt += YELLOW + name
+            else:
+                fmt += f"{YELLOW}UNKNOWN {PURPLE}(1 << {i})"
+            fmt += f"{RESET} | "
+    return fmt.strip("| ") or f"{YELLOW}0"
+
+
 def fmt_table(table: Iterable[tuple[str, Any]]) -> str:
     fmt = ""
     for k, v in table:
@@ -134,230 +681,10 @@ def get_eval_ctx(vm: CrossVM) -> dict[str, Any]:
     }
 
 
-def traverse_calls(vm: CrossVM) -> Iterator[CrossVM]:
-    while True:
-        yield vm
-        if not vm.parent:
-            break
-        vm = vm.parent  # type: ignore # no Self?
-
-
+# necessary for package script
 def main() -> None:
-    try:
-        import readline
-
-        readline.parse_and_bind("")
-    except ModuleNotFoundError:
-        pass
-
-    filename = sys.argv[1]
-    with open(filename, "rb") as f:
-        header = f.read(4)
-        f.seek(0)
-        if header[2:4] == PYC_MAGIC:
-            version, code = read_pyc(f)
-            vm = CrossVM(code, version=version)
-        else:
-            vm = CrossVM(compile(f.read(), filename, "exec"))
-
-    while True:
-        prompt = f"{YELLOW}[0x{vm.counter:0>8x}]>{RESET} "
-        try:
-            if len(sys.argv) > 2:
-                body = sys.argv.pop(2)
-            else:
-                body = input(prompt)
-        except EOFError:
-            print("^D")
-            return
-        except KeyboardInterrupt:
-            print("^C")
-            continue
-        for expr in body.split(";"):
-            expr = expr.strip()
-            if not expr:
-                continue
-
-            cmd, *args = expr.split(" ")
-
-            if cmd in {"step", "step!", "s", "s!"}:
-                if err := vm.step(unsafe=cmd.endswith("!")):
-                    print(fmt_error(err), fmt_current(vm))
-
-            elif cmd in {"cont", "cont!", "c", "c!"}:
-                try:
-                    if err := vm.cont(unsafe=cmd.endswith("!")):
-                        print(fmt_error(err), fmt_current(vm))
-                    else:
-                        print(f"{BLUE}[breakpoint]*", fmt_current(vm))
-                except KeyboardInterrupt:
-                    pass
-
-            elif cmd in {"where", "w"}:
-                mark = "* "
-                for i, x in enumerate(traverse_calls(vm)):
-                    print(f"{BLUE}[{mark}{i:>8}]:{RESET}", fmt_current(x))
-                    mark = "  "
-
-            elif cmd in {"dis", "i"}:
-                try:
-                    query = eval(" ".join(args) or "0", get_eval_ctx(vm))
-                except Exception:
-                    traceback.print_exc()
-                    print(f"{RED}[- failed -]{RESET}")
-                    return
-
-                if isinstance(query, int):
-                    for i, x in enumerate(traverse_calls(vm)):
-                        if i == query:
-                            obj = x
-                            break
-                elif isinstance(query, CodeType):
-                    obj = CrossVM(query)
-                elif isinstance(query, FunctionType):
-                    obj = CrossVM(query.__code__)
-                elif isinstance(query, CrossVM):
-                    obj = query
-                else:
-                    print(f"{RED}[- failed -]{RESET} invalid object")
-                    continue
-
-                for i, op, arg in obj.opcodes():
-                    mark = "   "
-                    if i in obj.breakpoints:
-                        if obj.breakpoints[i] is not None:
-                            mark = f" {YELLOW}o {GREEN}"
-                        else:
-                            mark = f" {RED}o {GREEN}"
-                    if i == obj.counter:
-                        mark = " * "
-                    print(
-                        f"{BLUE}[0x{i:0>8x}]:",
-                        fmt_opcode(obj.code, op, arg, mark),
-                    )
-
-            elif cmd in {"info", "f"}:
-                code = vm.code
-                location = f"{code.co_name} @ {code.co_filename}:{code.co_firstlineno}"
-                print(
-                    f"{BLUE}{'-- code --':^26}",
-                    fmt_table(
-                        [
-                            ("location", location),
-                            ("stack size", code.co_stacksize),
-                            ("flags", code.co_flags),
-                        ]
-                    ),
-                    fmt_table([("consts", "\n".join(map(fmt_const, code.co_consts)))]),
-                    fmt_table(
-                        [
-                            (scope, "\n".join(getattr(code, "co_" + scope)))
-                            for scope in ["names", "varnames", "freevars", "cellvars"]
-                        ]
-                    ),
-                    f"{BLUE}{'-- vm --':^26}",
-                    fmt_table([("version", fmt_version(vm.version))]),
-                    sep="\n",
-                )
-
-            elif cmd in {"break", "b"}:
-                if not args:
-                    print(f"{RED}[- failed -]{RESET} missing index argument")
-                    continue
-                addr = args[0]
-                condition = " ".join(args[1:])
-                if condition:
-                    try:
-                        compile(condition, "::<>", "eval")
-                    except SyntaxError:
-                        print(f"{RED}[- failed -]{RESET} invalid condition")
-                        continue
-                if addr.startswith("0x"):
-                    vm.toggle_breakpoint(int(addr, 16), condition or None)
-                elif addr.isdecimal():
-                    vm.toggle_breakpoint(int(addr), condition or None)
-
-            elif cmd in {"allow", "a"}:
-                if not args:
-                    print(f"{RED}[- failed -]{RESET} missing opcode argument")
-                    continue
-                condition = " ".join(args[1:])
-                if condition:
-                    try:
-                        compile(condition, "::<>", "eval")
-                    except SyntaxError:
-                        print(f"{RED}[- failed -]{RESET} invalid condition")
-                        continue
-                vm.unsafe_ignores[args[0]] = condition or None
-
-            elif cmd == "disallow":
-                for op_name in args:
-                    del vm.unsafe_ignores[op_name]
-
-            elif cmd in {"stack", "ps"}:
-                if vm.stack:
-                    mark = " ↓"
-                    for i, x in reversed([*enumerate(vm.stack)]):
-                        print(f"{BLUE}[{mark}{i:>8}]: {fmt_const(x)}{RESET}")
-                        mark = "  "
-                else:
-                    print(f"{RED}stack is empty{RESET}")
-
-            elif cmd in {"call", "l"}:
-                op, arg = vm.current_opcode()
-                try:
-                    if op == opcode.opmap["CALL_FUNCTION"]:
-                        vm = vm.call(arg)  # type: ignore
-                    else:
-                        argc = int(args[0]) if args else 0
-                        vm = vm.call(argc)  # type: ignore
-                except TypeError:
-                    print(f"{RED}[- failed -]{RESET} not a python function")
-
-            elif cmd in {"return", "r"}:
-                if not vm.parent:
-                    print(f"{RED}no outer frame{RESET}")
-                vm = vm.return_call()  # type: ignore
-
-            elif cmd == "push":
-                try:
-                    vm.stack.append(eval(" ".join(args), get_eval_ctx(vm)))
-                except Exception:
-                    traceback.print_exc()
-                    print(f"{RED}[- failed -]{RESET}")
-
-            elif cmd == "pop":
-                for idx in args or ["-1"]:
-                    print(vm.stack.pop(int(idx)))
-
-            elif cmd == "builtin":
-                if not args:
-                    print(vm.builtins)
-                    continue
-                for name in args:
-                    vm.builtins[name] = getattr(builtins, name)
-
-            elif cmd in {"incr", "i"}:
-                vm.counter = vm.next_opcode()
-
-            elif cmd in {"bai", "bye", "exit", "quit", "q"}:
-                return
-
-            else:
-                code_str = " ".join([cmd] + args)
-                try:
-                    compile(code_str, "::<>", "eval")
-                except SyntaxError:
-                    pass
-                else:
-                    code_str = "print(" + code_str + ")"
-
-                try:
-                    exec(code_str, get_eval_ctx(vm))
-                except Exception:
-                    traceback.print_exc()
-                    print(f"{RED}[- failed -]{RESET}")
+    Debugger().main()
 
 
 if __name__ == "__main__":
-    main()
+    Debugger().main()

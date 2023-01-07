@@ -1,3 +1,4 @@
+import enum
 import marshal
 import sys
 from types import CodeType
@@ -41,6 +42,29 @@ PYC_MAGIC = b"\r\n"
 
 # digits can be either 30 or 15 bits long, but marshal always uses 15
 LONG_SHIFT_RATIO = sys.int_info.bits_per_digit // 15
+
+
+class CompilerFlags(enum.IntFlag):
+    OPTIMIZED = 1 << 0
+    NEWLOCALS = 1 << 1
+    VARARGS = 1 << 2
+    VARKEYWORDS = 1 << 3
+    NESTED = 1 << 4
+    GENERATOR = 1 << 5
+    NOFREE = 1 << 6
+    COROUTINE = 1 << 7
+    ITERABLE_COROUTINE = 1 << 8
+    ASYNC_GENERATOR = 1 << 9
+
+    # Lib/__future__.py
+    FUTURE_DIVISION = 1 << 17
+    FUTURE_ABSOLUTE_IMPORT = 1 << 18
+    FUTURE_WITH_STATEMENT = 1 << 19
+    FUTURE_PRINT_FUNCTION = 1 << 20
+    FUTURE_UNICODE_LITERALS = 1 << 21
+    FUTURE_BARRY_AS_BDFL = 1 << 22
+    FUTURE_GENERATOR_STOP = 1 << 23
+    FUTURE_ANNOTATIONS = 1 << 24
 
 
 def fix_code_marshal(src: bytes, version: Version) -> bytes:
