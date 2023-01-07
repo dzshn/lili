@@ -86,7 +86,7 @@ class CommandHandler:
         for i, j in [("0x", 16), ("0o", 8), ("0b", 2)]:
             if string.removeprefix("-").startswith(i):
                 try:
-                    return int(j)
+                    return int(string, j)
                 except ValueError:
                     return None
         if string.isdecimal():
@@ -118,7 +118,7 @@ class CommandHandler:
         for i in range(argc):
             arg_name = code.co_varnames[min(i + 1, code.co_argcount)]
             required_type = type_hints[arg_name]
-            if required_type is str:
+            if required_type is str or required_type == NotEmpty[str]:
                 if i == argc - 1:
                     command_args.append(" ".join(arguments))
                     del arguments[:]
@@ -213,7 +213,7 @@ class Debugger(CommandHandler):
         while True:
             try:
                 for cmd in input(self.get_prompt()).split(";"):
-                    name, *cmd_args = cmd.split(" ")
+                    name, *cmd_args = cmd.strip().split(" ")
                     self.handle_command(name, cmd_args)
             except EOFError:
                 print("^D")
@@ -320,7 +320,7 @@ class Debugger(CommandHandler):
     @command("cont!", "c!")
     def cont_unsafe(self) -> None:
         """Like cont, but unsafe. May execute opcodes with side effects."""
-        if err := self.vm.cont():
+        if err := self.vm.cont(unsafe=True):
             self.print(fmt_error(err), fmt_current(self.vm))
 
     @command("where", "w")
