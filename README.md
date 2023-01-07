@@ -24,6 +24,16 @@ $ pip install git+https://github.com/dzshn/lili
 # or `py -m pip` etc
 ```
 
+## Usage
+
+Invoking `lili` will start an interactive session. Available commands are
+documented in the section below.
+
+```sh
+$ lili file  # compile and debug script
+$ lili file cmd1 cmd2 .. cmd3  # automatically run commands (will still start session)
+```
+
 ## Commands
 
 The following commands are recognised by `lili`. Text enclosed in `[]` is
@@ -32,6 +42,11 @@ hex, octal or binary with their respective prefixes (`0xc382f`, `0o777`,
 `0b10001111`). Any other expression will be evaluated as python code, outside
 of the actual program being debugged. The variables `vm`, `code`, `stack`,
 `locals`, `globals` and `builtins` are exposed for you to use.
+
+The `step` and `cont` commands will not execute opcodes with side effects not
+constrained to the VM's scopes and stack: `DUP_TOP` is fine, `CALL_FUNCTION`
+isn't. The `!` forms (`step!`, `cont!`) *will* execute these. You can also use
+the `allow` command to control when this happens.
 
 **`a[llow] opcode [condition]`**
 
