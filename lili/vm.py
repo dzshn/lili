@@ -257,6 +257,10 @@ class CrossVM(_WashningMashing):
     def rot_four(self, arg: int, unsafe: bool) -> None:
         self.stack[-4:] = [self.stack[-1], *self.stack[-4:-1]]
 
+    @_handles("ROT_N")
+    def rot_n(self, arg: int, unsafe: bool) -> None:
+        self.stack[-arg:] = [self.stack[-1], *self.stack[-arg:-1]]
+
     @_handles("DUP_TOP")
     def dup_top(self, arg: int, unsafe: bool) -> None:
         self.stack.append(self.stack[-1])
@@ -375,6 +379,61 @@ class CrossVM(_WashningMashing):
     @_unsafe
     def inplace_true_divide(self, arg: int, unsafe: bool) -> None:
         self.stack[-2] /= self.stack[-1]
+        self.stack.pop()
+
+    @_handles("BINARY_AND")
+    @_unsafe
+    def binary_and(self, arg: int, unsafe: bool) -> None:
+        self.stack.append(self.stack.pop(-2) & self.stack.pop())
+
+    @_handles("INPLACE_AND")
+    @_unsafe
+    def inplace_and(self, arg: int, unsafe: bool) -> None:
+        self.stack[-2] &= self.stack[-1]
+        self.stack.pop()
+
+    @_handles("BINARY_XOR")
+    @_unsafe
+    def binary_xor(self, arg: int, unsafe: bool) -> None:
+        self.stack.append(self.stack.pop(-2) ^ self.stack.pop())
+
+    @_handles("INPLACE_XOR")
+    @_unsafe
+    def inplace_xor(self, arg: int, unsafe: bool) -> None:
+        self.stack[-2] ^= self.stack[-1]
+        self.stack.pop()
+
+    @_handles("BINARY_OR")
+    @_unsafe
+    def binary_or(self, arg: int, unsafe: bool) -> None:
+        self.stack.append(self.stack.pop(-2) | self.stack.pop())
+
+    @_handles("INPLACE_OR")
+    @_unsafe
+    def inplace_or(self, arg: int, unsafe: bool) -> None:
+        self.stack[-2] |= self.stack[-1]
+        self.stack.pop()
+
+    @_handles("BINARY_RSHIFT")
+    @_unsafe
+    def binary_rshift(self, arg: int, unsafe: bool) -> None:
+        self.stack.append(self.stack.pop(-2) >> self.stack.pop())
+
+    @_handles("INPLACE_RSHIFT")
+    @_unsafe
+    def inplace_rshift(self, arg: int, unsafe: bool) -> None:
+        self.stack[-2] >>= self.stack[-1]
+        self.stack.pop()
+
+    @_handles("BINARY_LSHIFT")
+    @_unsafe
+    def binary_lshift(self, arg: int, unsafe: bool) -> None:
+        self.stack.append(self.stack.pop(-2) << self.stack.pop())
+
+    @_handles("INPLACE_LSHIFT")
+    @_unsafe
+    def inplace_lshift(self, arg: int, unsafe: bool) -> None:
+        self.stack[-2] <<= self.stack[-1]
         self.stack.pop()
 
     @_handles("BINARY_SUBSCR")
@@ -506,3 +565,15 @@ class CrossVM(_WashningMashing):
     @_unsafe
     def jump_absolute(self, arg: int, unsafe: bool) -> None:
         self.counter = arg * 2 - 2
+
+    @_handles("POP_JUMP_IF_TRUE")
+    @_unsafe
+    def pop_jump_if_true(self, arg: int, unsafe: bool) -> None:
+        if self.stack.pop():
+            self.counter = arg * 2 - 2
+
+    @_handles("POP_JUMP_IF_FALSE")
+    @_unsafe
+    def pop_jump_if_false(self, arg: int, unsafe: bool) -> None:
+        if not self.stack.pop():
+            self.counter = arg * 2 - 2
