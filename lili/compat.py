@@ -4,6 +4,26 @@ import sys
 from types import CodeType
 from typing import BinaryIO, Union
 
+try:
+    from importlib.util import MAGIC_NUMBER
+except ImportError:
+    MAGIC_NUMBER = (3000).to_bytes(2, "little")
+
+__all__ = [
+    "MAGIC_NUMBER",
+    "PYC_MAGIC",
+    "PYC_MAGIC_NUMBERS",
+    "FIXED_WIDTH_OPCODES",
+    "DETERMINISTIC_PYC",
+    "POSITIONAL_ONLY_PARAMS",
+    "ANNOTATIONS_IS_DEFAULT",
+    "ANNOTATIONS_USES_TUPLE",
+    "JUMP_BY_OFFSET",
+    "ANNOTATIONS_IS_NOT_DEFAULT",
+    "CompilerFlags",
+    "read_pyc",
+]
+
 Version = tuple[Union[int, str], ...]
 
 
@@ -126,9 +146,7 @@ def read_pyc(f: BinaryIO) -> tuple[Version, CodeType]:
             break
         version = v
 
-    if version < DETERMINISTIC_PYC:
-        f.seek(12)
-    else:
-        f.seek(16)
+    while f.read(1) != b"\xe3":
+        continue
 
     return version, marshal.loads(fix_code_marshal(f.read(), version))

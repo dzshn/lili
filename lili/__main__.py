@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import getopt
+import marshal
 import sys
 import textwrap
 import traceback
@@ -22,7 +23,8 @@ from typing import (
 import opcode
 
 import lili
-from lili.compat import PYC_MAGIC, CompilerFlags, Version, read_pyc
+from lili.assembler import read_pys
+from lili.compat import MAGIC_NUMBER, PYC_MAGIC, CompilerFlags, Version, read_pyc
 from lili.vm import CrossVM, UnresolvableOperation, UnsafeOperation
 
 T = TypeVar("T", str, int)
@@ -49,6 +51,8 @@ lili {lili.__version__}
 
 {BLUE}FLAGS
     {PURPLE}-h, --help      {YELLOW}Display this message
+    {PURPLE}-s, --assemble  {YELLOW}Parse file as human-readable bytecode
+    {PURPLE}-b, --bytecode  {YELLOW}Parse file as raw bytecode (usually automatic)
     {PURPLE}--[no-]color    {YELLOW}Force usage of colors (on by default on terminals)
 {RESET}\
 """
@@ -173,18 +177,26 @@ class Debugger(CommandHandler):
 
         opts, args = getopt.getopt(
             sys.argv[1:],
-            "h",
-            ["help", "color", "no-color"],
+            "bho:s",
+            ["assemble", "bytecode", "color", "no-color", "help", "output="],
         )
 
         is_interactive = sys.stdout.isatty()
 
+        mode = "auto"
+        output = None
         self.use_color = is_interactive
         for opt, value in opts:
             if opt in {"-h", "--help"}:
                 self.print(USAGE)
                 sys.exit(0)
-            if opt == "--color":
+            if opt in {"-s", "--assemble"}:
+                mode = "assemble"
+            elif opt in {"-b", "--bytecode"}:
+                mode = "bytecode"
+            elif opt in {"-o", "--output"}:
+                output = value
+            elif opt == "--color":
                 self.use_color = True
             elif opt == "--no-color":
                 self.use_color = False
@@ -198,11 +210,23 @@ class Debugger(CommandHandler):
         with open(filename, "rb") as f:
             header = f.read(4)
             f.seek(0)
-            if header[2:4] == PYC_MAGIC:
+            if mode == "auto" and header[2:4] == PYC_MAGIC:
+                mode = "bytecode"
+            if mode == "assemble":
+                code = read_pys(f)
+                self.vm = CrossVM(code)
+            elif mode == "bytecode":
                 version, code = read_pyc(f)
                 self.vm = CrossVM(code, version=version)
             else:
                 self.vm = CrossVM(compile(f.read(), filename, "exec"))
+
+        if output is not None:
+            with open(output, "xb") as f:
+                f.write(MAGIC_NUMBER)
+                f.write(bytes(12))
+                f.write(marshal.dumps(code))
+            return
 
         for i in args:
             name, *cmd_args = i.split(" ")
