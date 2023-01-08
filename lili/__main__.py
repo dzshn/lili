@@ -228,8 +228,8 @@ class Debugger(CommandHandler):
 
     def get_prompt(self) -> str:
         if not self.use_color:
-            return f"[0x{self.vm.counter:0>8}]> "
-        return f"{YELLOW}[0x{self.vm.counter:0>8}]>{RESET} "
+            return f"[0x{self.vm.counter:0>8x}]> "
+        return f"{YELLOW}[0x{self.vm.counter:0>8x}]>{RESET} "
 
     def print(self, *values: Any, **kwargs: Any) -> None:
         new_values: list[Any] = []
@@ -291,7 +291,7 @@ class Debugger(CommandHandler):
             self.print(f"{signature}{padding}{YELLOW} {doc}")
 
     @command("step", "s")
-    def step(self, times: int) -> None:
+    def step(self, times: int = 1) -> None:
         """Step over the next instruction.
 
         Only opcodes with no side effects are executed. (see `step!`)
@@ -302,7 +302,7 @@ class Debugger(CommandHandler):
                 break
 
     @command("step!", "s!")
-    def step_unsafe(self, times: int) -> None:
+    def step_unsafe(self, times: int = 1) -> None:
         """Like step, but unsafe. May execute opcodes with side effects."""
         for i in range(times):
             if err := self.vm.step(unsafe=True):
@@ -370,8 +370,8 @@ class Debugger(CommandHandler):
 
         for i, op, arg in vm.opcodes():
             mark = "   "
-            if bp := vm.breakpoints.get(i):
-                if bp is not None:
+            if i in vm.breakpoints:
+                if vm.breakpoints[i] is not None:
                     mark = f" {YELLOW}o {GREEN}"
                 else:
                     mark = f" {RED}o {GREEN}"
@@ -379,7 +379,8 @@ class Debugger(CommandHandler):
             if i == vm.counter:
                 mark = " * "
 
-            self.print(f"{BLUE}[0x{i:0>8x}]:", fmt_opcode(vm.code, op, arg, mark))
+            raw = vm.code.co_code[i : vm.next_opcode(i)]
+            self.print(f"{BLUE}[0x{i:0>8x}]:", fmt_opcode(vm.code, op, arg, raw, mark))
 
     @command("info", "o")
     def info(self, obj: Union[str, int] = "") -> None:
@@ -444,6 +445,15 @@ class Debugger(CommandHandler):
 
         self.vm.toggle_breakpoint(location, condition or None)
 
+    @command("save")
+    def save(self) -> None:
+        """Save the current stack, locals and globals. Restore using restore."""
+        self.vm.save()
+
+    @command("restore")
+    def restore(self, entry: int = 1) -> None:
+        self.vm.restore(entry)
+
     @command("allow", "a")
     def allow(self, opcode: str, condition: str = "") -> None:
         """Mark an opcode as safe."""
@@ -497,7 +507,7 @@ class Debugger(CommandHandler):
     def pop(self, *indices: int) -> None:
         """Pop and discard a value from the stack."""
         if not indices:
-            indices = (0,)
+            indices = (-1,)
         for i in indices:
             self.print(fmt_const(self.vm.stack.pop(i)))
 
@@ -587,8 +597,8 @@ def fmt_const(obj: Any, *, _depth: int = 0) -> str:
     return f"{RESET}{obj!r}"
 
 
-def fmt_opcode(code: CodeType, op: int, arg: int, mark: str = "") -> str:
-    fmt = f"{GREEN}[{mark}0x{op:0>2x}_{arg:0>2x}] {PURPLE}{opcode.opname[op]}"
+def fmt_opcode(code: CodeType, op: int, arg: int, raw: bytes, mark: str = "") -> str:
+    fmt = f"{GREEN}[{mark}0x{raw.hex('_')}] {PURPLE}{opcode.opname[op]}"
     annotation = ""
 
     if op in opcode.hasname:
@@ -596,6 +606,12 @@ def fmt_opcode(code: CodeType, op: int, arg: int, mark: str = "") -> str:
 
     elif op in opcode.hasconst:
         annotation = fmt_const(code.co_consts[arg])
+
+    elif op in opcode.hasjabs:
+        annotation = f"0x{arg*2:0>8x}"
+
+    elif op in opcode.hasjrel:
+        annotation = f"+ 0x{arg*2:0>8x}"
 
     elif op >= opcode.HAVE_ARGUMENT:
         annotation = str(arg)
@@ -607,7 +623,8 @@ def fmt_opcode(code: CodeType, op: int, arg: int, mark: str = "") -> str:
 
 
 def fmt_current(vm: CrossVM, show_address: bool = True) -> str:
-    fmt = fmt_opcode(vm.code, *vm.current_opcode())
+    raw = vm.code.co_code[vm.counter : vm.next_opcode()]
+    fmt = fmt_opcode(vm.code, *vm.current_opcode(), raw)
     if show_address:
         fmt = f"{BLUE}[0x{vm.counter:0>8x}]: " + fmt
 

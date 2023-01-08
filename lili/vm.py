@@ -16,6 +16,7 @@ __all__ = ["CrossVM"]
 
 # no typing.Self? <https://github.com/python/mypy/issues/11871>
 _WashningMashingT = TypeVar("_WashningMashingT", bound="_WashningMashing")
+State = tuple[int, list[Any], dict[str, Any], dict[str, Any]]
 
 
 class Handler(Protocol):
@@ -81,6 +82,7 @@ class _WashningMashing(abc.ABC):
         self.parent = parent
         self.breakpoints: dict[int, str | None] = {}
         self.unsafe_ignores: dict[str, str | None] = {}
+        self.savepoints: list[State] = []
 
     def step(self, unsafe: bool = False) -> Optional[UnresolvableOperation]:
         op, arg = self.current_opcode()
@@ -168,6 +170,14 @@ class _WashningMashing(abc.ABC):
                 return
             vm = vm.parent  # type: ignore
 
+    def save(self) -> None:
+        self.savepoints.append(
+            (self.counter, self.stack.copy(), self.locals.copy(), self.globals.copy())
+        )
+
+    def restore(self, n: int = 1) -> None:
+        self.counter, self.stack, self.locals, self.globals = self.savepoints[-n]
+
     @abc.abstractmethod
     def current_opcode(self) -> tuple[int, int]:
         ...
@@ -199,17 +209,20 @@ class CrossVM(_WashningMashing):
     def current_opcode(self) -> tuple[int, int]:
         co = self.code.co_code
         op = co[self.counter]
-        if self.version < FIXED_WIDTH_OPCODES and op < opcode.HAVE_ARGUMENT:
-            return op, 0
-
+        if self.version < FIXED_WIDTH_OPCODES:
+            if op < opcode.HAVE_ARGUMENT:
+                return op, 0
+            return op, int.from_bytes(co[self.counter + 1 : self.counter + 3], "little")
         return op, co[self.counter + 1]
 
     def next_opcode(self, i: Optional[int] = None) -> int:
         if i is None:
             i = self.counter
         op = self.code.co_code[i]
-        if self.version < FIXED_WIDTH_OPCODES and op < opcode.HAVE_ARGUMENT:
-            return i + 1
+        if self.version < FIXED_WIDTH_OPCODES:
+            if op < opcode.HAVE_ARGUMENT:
+                return i + 1
+            return i + 3
         return i + 2
 
     def opcodes(self) -> Iterator[tuple[int, int, int]]:
