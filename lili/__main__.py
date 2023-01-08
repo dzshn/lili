@@ -139,6 +139,7 @@ class CommandHandler:
                     arguments.pop(0)
                 elif i == argc - 1:
                     command_args.append(" ".join(arguments))
+                    del arguments[:]
                 else:
                     command_args.append(arguments.pop(0))
         if arguments:
