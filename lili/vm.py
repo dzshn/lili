@@ -12,6 +12,12 @@ import opcode
 
 from lili.compat import FIXED_WIDTH_OPCODES, Version
 
+try:
+    from lili._vm import DCrossVM
+except ImportError:
+    class DCrossVM:  # type: ignore
+        pass
+
 __all__ = ["CrossVM"]
 
 # no typing.Self? <https://github.com/python/mypy/issues/11871>
@@ -191,7 +197,7 @@ class _WashningMashing(abc.ABC):
         ...
 
 
-class CrossVM(_WashningMashing):
+class CrossVM(DCrossVM, _WashningMashing):
     def __init__(
         self,
         code: types.CodeType,
