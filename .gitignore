@@ -1,2 +1,5 @@
 __pycache__/
 .tox/
+*.so
+*.o
+*.dll
