@@ -175,7 +175,7 @@ class Debugger(CommandHandler):
             readline.parse_and_bind("tab: complete")
             readline.set_completer(self.complete)
 
-        opts, args = getopt.getopt(
+        opts, args = getopt.gnu_getopt(
             sys.argv[1:],
             "bho:s",
             ["assemble", "bytecode", "color", "no-color", "help", "output="],
